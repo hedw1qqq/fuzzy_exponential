@@ -33,48 +33,55 @@ class GuiSmokeTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if cls.window.thread is not None and cls.window.thread.isRunning():
-            cls.window.thread.quit()
-            cls.window.thread.wait(3000)
+        thread = cls.window.clusters_page.thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            thread.wait(3000)
         cls.window.close()
 
     def test_values_and_operation(self):
-        self.window.operator.setCurrentIndex(0)
-        self.window.run_operation()
-        self.assertIn('A + B', self.window.operation_status.text())
-        self.assertEqual(len(self.window.values_chart.axes), 2)
+        page = self.window.values_page
+        page.operator.setCurrentIndex(0)
+        page.run_operation()
+        self.assertIn('A + B', page.operation_status.text())
+        self.assertEqual(len(page.values_chart.axes), 2)
 
     def test_alpha_slider_uses_plotted_values(self):
-        self.window.a_a.setValue(2)
-        self.window.show_values()
+        page = self.window.values_page
+        page.a_a.setValue(2)
+        page.show_values()
         try:
-            self.window.a_a.setValue(3)
-            self.window.alpha_slider.setValue(100)
-            self.assertIn('Aα: [2.000; 2.000]', self.window.alpha_result.text())
-            self.window.show_values()
-            self.assertIn('Aα: [3.000; 3.000]', self.window.alpha_result.text())
+            marker = page.values_chart.alpha_line
+            page.a_a.setValue(3)
+            page.alpha_slider.setValue(100)
+            self.assertIs(page.values_chart.alpha_line, marker)
+            self.assertEqual(list(marker.get_ydata()), [1.0, 1.0])
+            self.assertIn('Aα: [2.000; 2.000]', page.alpha_result.text())
+            page.show_values()
+            self.assertIn('Aα: [3.000; 3.000]', page.alpha_result.text())
         finally:
-            self.window.a_a.setValue(2)
-            self.window.alpha_slider.setValue(50)
-            self.window.show_values()
+            page.a_a.setValue(2)
+            page.alpha_slider.setValue(50)
+            page.show_values()
 
     def test_generation_and_clustering(self):
-        self.window.n_samples.setValue(100)
-        self.window.generate_data()
-        self.assertEqual(self.window.table.rowCount(), 100)
-        self.window.k_count.setValue(4)
-        self.window.cluster_data()
+        page = self.window.clusters_page
+        page.n_samples.setValue(100)
+        page.generate_data()
+        self.assertEqual(page.table.rowCount(), 100)
+        page.k_count.setValue(4)
+        page.cluster_data()
         # Результаты worker->GUI доставляются Qt event loop, не обычным sleep.
         loop = QEventLoop()
         timer = QTimer()
         timer.setSingleShot(True)
         timer.timeout.connect(loop.quit)
         timer.start(8000)
-        self.window.thread.finished.connect(loop.quit)
+        page.thread.finished.connect(loop.quit)
         loop.exec()
-        self.assertIsNotNone(self.window.cluster_labels)
-        self.assertEqual(len(set(self.window.cluster_labels)), 4)
-        self.assertTrue(self.window.cluster_btn.isEnabled())
+        self.assertIsNotNone(page.cluster_labels)
+        self.assertEqual(len(set(page.cluster_labels)), 4)
+        self.assertTrue(page.cluster_btn.isEnabled())
 
 
 if __name__ == '__main__':

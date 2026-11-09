@@ -66,6 +66,9 @@ class ClustersPage(QWidget):
         g.addLayout(field_layout('Количество величин (100–300)', self.n_samples))
         g.addLayout(field_layout('Seed (для повторяемости)', self.seed))
         g.addLayout(field_layout('Распределение параметров', self.generation_mode))
+        self.alpha = float_box(0.5, 0.01, 1.0, 2)
+        g.addLayout(field_layout('Общий уровень α (один интервал на величину)', self.alpha))
+        self.alpha.valueChanged.connect(self._alpha_changed)
         self.generate_btn = button('Сгенерировать набор', primary=True)
         self.generate_btn.clicked.connect(self.generate_data)
         g.addWidget(self.generate_btn)
@@ -83,6 +86,7 @@ class ClustersPage(QWidget):
         s.addWidget(self.mode_threshold)
         self.threshold = float_box(0.9, 0.001, 1000.0, 3)
         s.addLayout(field_layout('Порог d', self.threshold))
+        s.addWidget(label('Работает только выбранный режим: k или d.', 'hint', True))
         self.mode_count.toggled.connect(self.update_cluster_mode)
         self.mode_threshold.toggled.connect(self.update_cluster_mode)
         self.update_cluster_mode()
@@ -132,6 +136,14 @@ class ClustersPage(QWidget):
         split.setStretchFactor(1, 1)
         self.cluster_chart.plot_clusters(self.samples, self.cluster_labels)
 
+    def _alpha_changed(self, _value: float):
+        # Старые интервалы соответствуют предыдущему α. Нельзя смешивать их с новыми.
+        self.samples = []
+        self.cluster_labels = None
+        self._refresh_table()
+        self.cluster_chart.plot_clusters([], None)
+        self.cluster_status.setText('Уровень α изменён. Сгенерируйте новый набор.')
+
     def update_cluster_mode(self, _checked: bool | None = None):
         self.k_count.setEnabled(self.mode_count.isChecked())
         self.threshold.setEnabled(self.mode_threshold.isChecked())
@@ -141,18 +153,18 @@ class ClustersPage(QWidget):
             n = self.n_samples.value()
             seed = self.seed.value()
             mode = 'groups' if self.generation_mode.currentIndex() == 0 else 'uniform'
-            self.samples = generate_samples(n, seed=seed, mode=mode)
+            self.samples = generate_samples(n, seed=seed, mode=mode, alpha=self.alpha.value())
             self.cluster_labels = None
             self.cluster_chart.plot_clusters(self.samples, self.cluster_labels)
             self._refresh_table()
-            self.cluster_status.setText(f'Создано величин: {n}\n'
+            self.cluster_status.setText(f'Создано интервалов: {n} (α={self.alpha.value():.2f})\n'
                                         f'Режим: {self.generation_mode.currentText()}\n'
                                         'Можно запускать кластеризацию.')
-            self._write_log(f'Генерация {n} нечётких величин, seed={seed}, mode={mode}.')
+            self._write_log(f'Генерация {n} α-интервалов (α={self.alpha.value():.2f}), seed={seed}, mode={mode}.')
             # Записываем данные каждой величины в журнал на диске.
             for i, sample in enumerate(self.samples, 1):
                 self.journal.info(f'X{i}: a={sample.a:.6f}, λ={sample.lam:.6f}, '
-                                 f'α=0.01 [{sample.number.left[0]:.6f}; {sample.number.right[0]:.6f}].')
+                                 f'α={sample.number.alpha:.2f} [{sample.number.left[0]:.6f}; {sample.number.right[0]:.6f}].')
         except (ValueError, OverflowError) as exc:
             QMessageBox.warning(self, 'Ошибка генерации', str(exc))
 
@@ -171,6 +183,7 @@ class ClustersPage(QWidget):
         self.cluster_status.setText('Вычисление кластеров…')
         self.cluster_btn.setEnabled(False)
         self.generate_btn.setEnabled(False)
+        self.alpha.setEnabled(False)
         self.thread = QThread(self)
         self.worker = ClusteringWorker([s.number for s in self.samples], mode, value)
         self.worker.moveToThread(self.thread)
@@ -189,7 +202,7 @@ class ClustersPage(QWidget):
         self.cluster_labels = np.asarray(labels, dtype=int)
         unique, counts = np.unique(self.cluster_labels, return_counts=True)
         sizes = ', '.join(str(x) for x in counts)
-        self.cluster_status.setText(f'Объектов: {len(labels)}\n'
+        self.cluster_status.setText(f'Объектов: {len(labels)} (α={self.samples[0].number.alpha:.2f})\n'
                                     f'Получено кластеров: {len(unique)}\n'
                                     f'Размеры: {sizes}')
         self._refresh_table()
@@ -211,6 +224,7 @@ class ClustersPage(QWidget):
         self.worker = None
         self.cluster_btn.setEnabled(True)
         self.generate_btn.setEnabled(True)
+        self.alpha.setEnabled(True)
 
     def _refresh_table(self):
         self.table.setUpdatesEnabled(False)

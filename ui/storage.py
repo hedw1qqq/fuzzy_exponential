@@ -47,10 +47,10 @@ class Journal:
 def write_samples_csv(path: str, samples: list[Sample], labels: np.ndarray | None):
     with open(path, 'w', newline='', encoding='utf-8-sig') as fh:
         writer = csv.writer(fh, delimiter=';')
-        writer.writerow(['id', 'a', 'lambda', 'scale_1/lambda',
-                         'alpha_min', 'left_min', 'right_min', 'cluster'])
+        writer.writerow(['id', 'a', 'lambda', 'alpha', 'left', 'right', 'width', 'cluster'])
         for idx, sample in enumerate(samples):
             writer.writerow([idx + 1, f'{sample.a:.8f}', f'{sample.lam:.8f}',
-                             f'{1/sample.lam:.8f}', f'{sample.number.alphas[0]:.5f}',
+                             f'{sample.number.alpha:.5f}',
                              f'{sample.number.left[0]:.8f}', f'{sample.number.right[0]:.8f}',
+                             f'{sample.number.right[0] - sample.number.left[0]:.8f}',
                              '' if labels is None else int(labels[idx])])

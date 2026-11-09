@@ -1,6 +1,6 @@
 """Независимая библиотека генерации и кластерного анализа нечётких величин.
 
-Расстояние — среднеквадратичное различие границ α-срезов.
+Расстояние — RMS-различие двух концов единственного α-среза.
 Алгоритм — иерархическая агломеративная кластеризация, complete linkage.
 Останов: число кластеров k ИЛИ максимальный допустимый межкластерный порог.
 """
@@ -8,7 +8,7 @@
 from dataclasses import dataclass
 import heapq
 import numpy as np
-from fuzzy_numbers import FuzzyNumber, exponential
+from fuzzy_numbers import FuzzyNumber, exponential, DEFAULT_ALPHA
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,8 @@ class Sample:
     number: FuzzyNumber
 
 
-def generate_samples(n: int, seed: int = 42, mode: str = "groups") -> list[Sample]:
+def generate_samples(n: int, seed: int = 42, mode: str = "groups",
+                     alpha: float = DEFAULT_ALPHA) -> list[Sample]:
     if isinstance(n, bool) or not isinstance(n, (int, np.integer)) or not 100 <= n <= 300:
         raise ValueError("Количество нечётких величин должно быть от 100 до 300.")
     rng = np.random.default_rng(seed)
@@ -33,7 +34,7 @@ def generate_samples(n: int, seed: int = 42, mode: str = "groups") -> list[Sampl
         lam = rng.uniform(0.35, 2.4, n)
     else:
         raise ValueError("Режим генерации: groups или uniform.")
-    return [Sample(float(a), float(p), exponential(float(a), float(p), f"X{i+1}"))
+    return [Sample(float(a), float(p), exponential(float(a), float(p), f"X{i+1}", alpha=alpha))
             for i, (a, p) in enumerate(zip(aa, lam))]
 
 
@@ -42,7 +43,7 @@ def pairwise_distances(numbers: list[FuzzyNumber]) -> np.ndarray:
         raise ValueError("Набор нечётких величин пуст.")
     ref = numbers[0].alphas
     if any(not np.array_equal(num.alphas, ref) for num in numbers):
-        raise ValueError("Все нечёткие величины должны иметь одни α-уровни.")
+        raise ValueError("Все величины должны иметь один общий уровень α.")
     features = np.stack([np.concatenate((v.left, v.right)) for v in numbers])
     dist = np.zeros((len(numbers), len(numbers)))
     for i, feature in enumerate(features[:-1]):
@@ -55,7 +56,7 @@ def pairwise_distances(numbers: list[FuzzyNumber]) -> np.ndarray:
 
 def cluster_numbers(numbers: list[FuzzyNumber], *, k: int | None = None,
                     threshold: float | None = None) -> np.ndarray:
-    """Complete linkage по RMS-расстоянию α-срезов.
+    """Complete linkage по RMS-расстоянию концов выбранных α-срезов.
 
     Ровно один параметр: k — итоговое число кластеров; либо threshold —
     максимальное расстояние между элементами объединяемых кластеров.

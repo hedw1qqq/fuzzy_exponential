@@ -121,9 +121,9 @@ class ClustersPage(QWidget):
         chart_frame.layout().addWidget(self.cluster_chart, 1)
         right_layout.addWidget(chart_frame, 3)
         table_frame = card(vertical(8, (14, 12, 14, 12)))
-        table_frame.layout().addWidget(label('Нечёткие величины и принадлежность к кластерам', 'section'))
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(['№', 'Сдвиг a', 'Интенсивность λ', 'Масштаб 1/λ', 'Кластер'])
+        table_frame.layout().addWidget(label('Интервалы на уровне α и принадлежность к кластерам', 'section'))
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(['№', 'α', 'Левая L', 'Правая R', 'Положение', 'Размах', 'Кластер'])
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -232,8 +232,11 @@ class ClustersPage(QWidget):
             self.table.setRowCount(len(self.samples))
             for idx, item in enumerate(self.samples):
                 cluster_id = ('—' if self.cluster_labels is None else str(self.cluster_labels[idx]))
-                values = (str(idx + 1), f'{item.a:.4f}', f'{item.lam:.4f}',
-                          f'{1.0 / item.lam:.4f}', cluster_id)
+                left, right = item.number.left[0], item.number.right[0]
+                values = (str(idx + 1), f'{item.number.alpha:.2f}',
+                          f'{left:.4f}', f'{right:.4f}',
+                          f'{(left + right) / 2:.4f}', f'{right - left:.4f}',
+                          cluster_id)
                 for col, value in enumerate(values):
                     cell = QTableWidgetItem(value)
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)

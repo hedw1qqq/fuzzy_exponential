@@ -2,7 +2,6 @@
 
 from collections.abc import Callable
 
-import numpy as np
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QMessageBox, QSlider, QSplitter, QWidget
 
@@ -82,7 +81,7 @@ class ValuesPage(QWidget):
         chart_layout.addWidget(label('Графики функций и границ α-срезов', 'section'))
         self.values_chart = Chart(rows=2)
         chart_layout.addWidget(self.values_chart, 1)
-        chart_layout.addWidget(label('Пунктир — правая граница α-среза; сплошная — левая.', 'hint'))
+        chart_layout.addWidget(label('Цветные отрезки — α-срезы; для C полная функция принадлежности неизвестна.', 'hint'))
         split.addWidget(chart_frame)
         split.setSizes([350, 830])
         split.setStretchFactor(0, 0)

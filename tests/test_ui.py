@@ -75,6 +75,7 @@ class GuiSmokeTest(unittest.TestCase):
         page.alpha.setValue(0.4)
         page.generate_data()
         self.assertEqual(page.table.rowCount(), 100)
+        self.assertEqual(page.table.columnCount(), 7)
         self.assertTrue(all(s.number.alpha == 0.4 for s in page.samples))
         page.alpha.setValue(0.6)
         self.assertEqual(page.table.rowCount(), 0)

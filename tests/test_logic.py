@@ -1,61 +1,58 @@
 import unittest
+
 import numpy as np
-from fuzzy_numbers import exponential, calculate, compare
-from clustering import generate_samples, pairwise_distances, cluster_numbers
+
+from clustering import alpha_mask, generate_samples, k_medoids, pairwise_distances
+from fuzzy_numbers import FuzzyNumber, calculate, compare, exponential_membership
 
 
 class FuzzyNumbersTest(unittest.TestCase):
-    def test_alpha_cut(self):
-        a = exponential(2, 0.5)
-        self.assertAlmostEqual(a.left[-1], 2.0)
-        self.assertAlmostEqual(a.right[-1], 2.0)
-        self.assertAlmostEqual(a.right[0], 2-np.log(0.01)/0.5)
+    def test_membership_and_filter(self):
+        intervals = [FuzzyNumber(0, 0), FuzzyNumber(0, 2), FuzzyNumber(1, 3)]
+        np.testing.assert_allclose(exponential_membership([-1, 0, 1], 2), [0, 1, np.exp(-2)])
+        np.testing.assert_array_equal(alpha_mask(intervals, 1, np.exp(-1)), [True, True, False])
+        np.testing.assert_array_equal(alpha_mask(intervals, 1, 0), [True, True, True])
+        np.testing.assert_array_equal(alpha_mask(intervals, 1, 1), [True, False, False])
+        with self.assertRaises(ValueError):
+            alpha_mask(intervals, 1, 1.1)
 
     def test_arithmetic(self):
-        a, b = exponential(2, 1), exponential(3, 2)
-        self.assertAlmostEqual(calculate(a,b,'+').left[-1], 5)
-        self.assertAlmostEqual(calculate(a,b,'-').right[-1], -1)
-        self.assertAlmostEqual(calculate(a,b,'*').left[-1], 6)
-        self.assertAlmostEqual(calculate(a,b,'/').right[-1], 2/3)
+        a, b = FuzzyNumber(2, 4), FuzzyNumber(1, 2)
+        for op, expected in [('+', (3, 6)), ('-', (0, 3)), ('*', (2, 8)), ('/', (1, 4))]:
+            with self.subTest(operation=op):
+                self.assertEqual(calculate(a, b, op), FuzzyNumber(*expected))
+        self.assertEqual(calculate(FuzzyNumber(-4, 2), FuzzyNumber(-2, -1), '/'), FuzzyNumber(-2, 4))
+        with self.assertRaisesRegex(ValueError, '0'):
+            calculate(a, FuzzyNumber(-1, 0), '/')
 
     def test_compare(self):
-        self.assertEqual(compare(exponential(1, 1), exponential(4, 1)), '<')
-
-    def test_invalid_division(self):
-        with self.assertRaisesRegex(ValueError, '0'):
-            calculate(exponential(3,1), exponential(0,2), '/')
-
-    def test_negative_intervals(self):
-        a = exponential(-4,1)
-        b = exponential(0.5,2)
-        result = calculate(a,b,'*')
-        self.assertTrue(np.all(result.left <= result.right))
+        self.assertEqual(compare(FuzzyNumber(1, 2), FuzzyNumber(3, 4)), '<')
+        self.assertEqual(compare(FuzzyNumber(2, 3), FuzzyNumber(0, 2)), '≈')
+        self.assertEqual(compare(FuzzyNumber(2, 3), FuzzyNumber(-3, -1)), '>')
 
 
 class ClusteringTest(unittest.TestCase):
-    def test_distance_at_large_shift(self):
-        numbers = [exponential(1e8, 1), exponential(1e8 + 1, 1)]
-        self.assertAlmostEqual(pairwise_distances(numbers)[0, 1], 1.0)
+    def test_four_distances(self):
+        numbers = [FuzzyNumber(0, 3), FuzzyNumber(1, 6)]
+        for metric, distance in enumerate((3, 2, 16, np.sqrt(10))):
+            with self.subTest(metric=metric):
+                np.testing.assert_allclose(pairwise_distances(numbers, metric), [[0, distance], [distance, 0]])
 
-    def test_generation_and_k(self):
-        samples = generate_samples(100)
-        self.assertEqual(len(samples),100)
-        numbers = [v.number for v in samples]
-        self.assertEqual(len(np.unique(cluster_numbers(numbers,k=4))), 4)
-        dist = pairwise_distances(numbers[:5])
-        np.testing.assert_allclose(dist, dist.T, atol=1e-8)
-        np.testing.assert_allclose(np.diag(dist), np.zeros(5), atol=1e-8)
+    def test_k_medoids(self):
+        numbers = [FuzzyNumber(x, x + 1) for x in (0, 1, 2, 10, 11, 12)]
+        distances = pairwise_distances(numbers)
+        labels, medoids = k_medoids(distances, k=2)
+        self.assertEqual(set(medoids), {1, 4})
+        self.assertEqual(len(set(labels[:3])), 1)
+        self.assertEqual(len(set(labels[3:])), 1)
+        self.assertNotEqual(labels[0], labels[3])
 
-    def test_threshold_extremes(self):
-        numbers = [s.number for s in generate_samples(100)]
-        labels = cluster_numbers(numbers, threshold=1e-9)
-        self.assertEqual(len(set(labels)),100)
-        labels2 = cluster_numbers(numbers, threshold=1e6)
-        self.assertEqual(len(set(labels2)),1)
-
-    def test_generation_reproducible(self):
-        s1, s2 = generate_samples(100,seed=123), generate_samples(100,seed=123)
-        self.assertEqual([v.a for v in s1], [v.a for v in s2])
+    def test_generation(self):
+        numbers = generate_samples(300, lam=2, seed=123)
+        self.assertEqual(numbers, generate_samples(300, lam=2, seed=123))
+        self.assertEqual(len(numbers), 300)
+        self.assertTrue(all(0 <= item.left < item.right for item in numbers))
+        self.assertGreater(sum(alpha_mask(numbers, 2, 0.8)), 0)
 
 
 if __name__ == '__main__':

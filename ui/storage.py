@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from clustering import Sample
+from fuzzy_numbers import FuzzyNumber, exponential_membership
 
 
 class Journal:
@@ -44,13 +44,14 @@ class Journal:
         self.handler.close()
 
 
-def write_samples_csv(path: str, samples: list[Sample], labels: np.ndarray | None):
+def write_samples_csv(path: str, samples: list[FuzzyNumber], lam: float, alpha: float,
+                      mask: np.ndarray, labels: np.ndarray | None, filtered_labels: dict):
+    membership = exponential_membership([number.center for number in samples], lam)
     with open(path, 'w', newline='', encoding='utf-8-sig') as fh:
         writer = csv.writer(fh, delimiter=';')
-        writer.writerow(['id', 'a', 'lambda', 'scale_1/lambda',
-                         'alpha_min', 'left_min', 'right_min', 'cluster'])
-        for idx, sample in enumerate(samples):
-            writer.writerow([idx + 1, f'{sample.a:.8f}', f'{sample.lam:.8f}',
-                             f'{1/sample.lam:.8f}', f'{sample.number.alphas[0]:.5f}',
-                             f'{sample.number.left[0]:.8f}', f'{sample.number.right[0]:.8f}',
-                             '' if labels is None else int(labels[idx])])
+        writer.writerow(['id', 'left', 'right', 'lambda', 'alpha', 'membership',
+                         'selected', 'cluster', 'filtered_cluster'])
+        for idx, number in enumerate(samples):
+            writer.writerow([idx + 1, f'{number.left:.8g}', f'{number.right:.8g}', lam, alpha,
+                             f'{membership[idx]:.8g}', int(mask[idx]),
+                             '' if labels is None else int(labels[idx]), filtered_labels.get(idx, '')])

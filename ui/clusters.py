@@ -4,47 +4,59 @@ from collections.abc import Callable
 
 import numpy as np
 from PyQt6.QtCore import QObject, QThread, Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QMessageBox,
-    QRadioButton, QSplitter, QTableWidget, QTableWidgetItem, QWidget,
+    QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QMessageBox,
+    QSplitter, QTableWidget, QTableWidgetItem, QWidget,
 )
 
-from clustering import Sample, cluster_numbers, generate_samples
-from fuzzy_numbers import FuzzyNumber
+from clustering import METRICS, alpha_mask, generate_samples, k_medoids, pairwise_distances
+from fuzzy_numbers import ALPHA, FuzzyNumber, exponential_membership
 from .storage import Journal, write_samples_csv
-from .widgets import Chart, button, card, field_layout, float_box, int_box, label, make_scroll, vertical
+from .widgets import CLUSTER_COLORS, Chart, button, card, field_layout, int_box, label, make_scroll, vertical
 
 
 class ClusteringWorker(QObject):
     result = pyqtSignal(object)
     error = pyqtSignal(str)
 
-    def __init__(self, numbers: list[FuzzyNumber], mode: str, value: float | int):
+    def __init__(self, numbers, mask, k, metric, max_iter, seed):
         super().__init__()
         self.numbers = numbers
-        self.mode = mode
-        self.value = value
+        self.mask = mask
+        self.k = k
+        self.metric = metric
+        self.max_iter = max_iter
+        self.seed = seed
+
+    def _cluster(self, distances):
+        labels, medoids = k_medoids(
+            distances, min(self.k, len(distances)), self.max_iter, self.seed,
+        )
+        return labels, distances[np.arange(len(distances)), medoids[labels]]
 
     @pyqtSlot()
     def run(self):
         try:
-            labels = cluster_numbers(
-                self.numbers,
-                k=int(self.value) if self.mode == 'count' else None,
-                threshold=float(self.value) if self.mode == 'threshold' else None,
-            )
-            self.result.emit(labels)
+            distances = pairwise_distances(self.numbers, self.metric)
+            full = self._cluster(distances)
+            filtered = self._cluster(distances[np.ix_(self.mask, self.mask)]) if self.mask.any() else None
+            self.result.emit((full, filtered))
         except Exception as exc:
             self.error.emit(str(exc))
 
 
 class ClustersPage(QWidget):
+    busy_changed = pyqtSignal(bool)
+
     def __init__(self, write_log: Callable[[str], None], journal: Journal):
         super().__init__()
         self._write_log = write_log
         self.journal = journal
-        self.samples: list[Sample] = []
-        self.cluster_labels: np.ndarray | None = None
+        self.alpha = ALPHA
+        self.lam = 1.0
+        self.samples: list[FuzzyNumber] = []
+        self.full = self.filtered = None
         self.worker: ClusteringWorker | None = None
         self.thread: QThread | None = None
         self.setObjectName('page')
@@ -54,57 +66,46 @@ class ClustersPage(QWidget):
         layout.addWidget(split)
         panel = QWidget()
         panel.setObjectName('page')
-        stack = vertical(12, (0, 0, 4, 0))
+        stack = vertical(8, (0, 0, 4, 0))
         panel.setLayout(stack)
-        generator = card(vertical(12))
+        generator = card(vertical(7, (14, 11, 14, 11)))
         g = generator.layout()
         g.addWidget(label('Генерация выборки', 'section'))
         self.n_samples = int_box(150, 100, 300)
         self.seed = int_box(42, 0, 2_147_483_647)
-        self.generation_mode = QComboBox()
-        self.generation_mode.addItems(['Группы (4 центра)', 'Равномерно'])
-        g.addLayout(field_layout('Количество величин (100–300)', self.n_samples))
-        g.addLayout(field_layout('Seed (для повторяемости)', self.seed))
-        g.addLayout(field_layout('Распределение параметров', self.generation_mode))
-        self.generate_btn = button('Сгенерировать набор', primary=True)
+        sample_fields = QHBoxLayout()
+        sample_fields.addLayout(field_layout('Интервалы', self.n_samples))
+        sample_fields.addLayout(field_layout('Seed', self.seed))
+        self.n_samples.setToolTip('От 100 до 300 интервалов')
+        self.seed.setToolTip('Задаёт воспроизводимость выборки и начальных медоидов')
+        g.addLayout(sample_fields)
+        self.generate_btn = button('Сгенерировать')
         self.generate_btn.clicked.connect(self.generate_data)
         g.addWidget(self.generate_btn)
         stack.addWidget(generator)
 
-        settings = card(vertical(12))
+        settings = card(vertical(7, (14, 11, 14, 11)))
         s = settings.layout()
-        s.addWidget(label('Критерий кластеризации', 'section'))
-        self.mode_count = QRadioButton('Заданное число кластеров')
-        self.mode_threshold = QRadioButton('Порог расстояния')
-        self.mode_count.setChecked(True)
-        s.addWidget(self.mode_count)
-        self.k_count = int_box(4, 1, 300)
-        s.addLayout(field_layout('Количество k', self.k_count))
-        s.addWidget(self.mode_threshold)
-        self.threshold = float_box(0.9, 0.001, 1000.0, 3)
-        s.addLayout(field_layout('Порог d', self.threshold))
-        self.mode_count.toggled.connect(self.update_cluster_mode)
-        self.mode_threshold.toggled.connect(self.update_cluster_mode)
-        self.update_cluster_mode()
+        s.addWidget(label('Настройки k-medoids', 'section'))
+        self.k_count = int_box(3, 1, 300)
+        self.iterations = int_box(100, 1, 1000)
+        self.metric = QComboBox()
+        self.metric.addItems(('Хаусдорф', 'Разность ширин', 'Разность квадратов', 'Евклидова'))
+        for index, metric_name in enumerate(METRICS):
+            self.metric.setItemData(index, metric_name, Qt.ItemDataRole.ToolTipRole)
+        self.metric.currentIndexChanged.connect(self._metric_changed)
+        cluster_fields = QHBoxLayout()
+        cluster_fields.addLayout(field_layout('Кластеры', self.k_count))
+        cluster_fields.addLayout(field_layout('Макс. итераций', self.iterations))
+        s.addLayout(cluster_fields)
+        s.addLayout(field_layout('Метрика', self.metric))
         self.cluster_btn = button('Выполнить кластеризацию', primary=True)
         self.cluster_btn.clicked.connect(self.cluster_data)
         s.addWidget(self.cluster_btn)
-        self.export_btn = button('Экспорт таблицы CSV')
-        self.export_btn.clicked.connect(self.export_csv)
-        s.addWidget(self.export_btn)
         stack.addWidget(settings)
-        info = QFrame()
-        info.setObjectName('summary')
-        info.setLayout(vertical(8, (15, 15, 15, 15)))
-        info.layout().addWidget(label('ИТОГ АНАЛИЗА', 'hint'))
-        self.cluster_status = label('Сначала сгенерируйте набор.', 'result', True)
-        info.layout().addWidget(self.cluster_status)
-        stack.addWidget(info)
-        stack.addWidget(label('Алгоритм: иерархический complete linkage.\n'
-                              'Метрика: RMS расстояние границ α-срезов.', 'hint', True))
         stack.addStretch(1)
         scroll = make_scroll(panel)
-        scroll.setMinimumWidth(285)
+        scroll.setMinimumWidth(260)
         split.addWidget(scroll)
 
         right = QWidget()
@@ -112,67 +113,87 @@ class ClustersPage(QWidget):
         right_layout = vertical(10, (0, 0, 0, 0))
         right.setLayout(right_layout)
         chart_frame = card(vertical(7, (14, 13, 14, 13)))
-        chart_frame.layout().addWidget(label('Пространство параметров', 'section'))
-        self.cluster_chart = Chart()
+        self.cluster_chart = Chart(side_by_side=True)
         chart_frame.layout().addWidget(self.cluster_chart, 1)
-        right_layout.addWidget(chart_frame, 3)
+        self.cluster_status = label('Сначала сгенерируйте набор.', 'hint', True)
+        chart_frame.layout().addWidget(self.cluster_status)
+        right_layout.addWidget(chart_frame, 5)
         table_frame = card(vertical(8, (14, 12, 14, 12)))
-        table_frame.layout().addWidget(label('Нечёткие величины и принадлежность к кластерам', 'section'))
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(['№', 'Сдвиг a', 'Интенсивность λ', 'Масштаб 1/λ', 'Кластер'])
+        table_header = QHBoxLayout()
+        table_header.addWidget(label('Интервалы', 'section'))
+        table_header.addStretch()
+        self.export_btn = button('Сохранить CSV')
+        self.export_btn.clicked.connect(self.export_csv)
+        table_header.addWidget(self.export_btn)
+        table_frame.layout().addLayout(table_header)
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(['№', 'Левая', 'Правая', 'μ центра', 'Кластер', 'После α'])
+        self.table.horizontalHeaderItem(4).setToolTip('Кластер в полном наборе')
+        self.table.horizontalHeaderItem(5).setToolTip('Кластер после фильтрации по α')
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         table_frame.layout().addWidget(self.table)
-        right_layout.addWidget(table_frame, 2)
+        right_layout.addWidget(table_frame, 4)
         split.addWidget(right)
-        split.setSizes([350, 830])
+        split.setSizes([288, 960])
         split.setStretchFactor(1, 1)
-        self.cluster_chart.plot_clusters(self.samples, self.cluster_labels)
+        self._refresh_results()
 
-    def update_cluster_mode(self, _checked: bool | None = None):
-        self.k_count.setEnabled(self.mode_count.isChecked())
-        self.threshold.setEnabled(self.mode_threshold.isChecked())
+    def _metric_changed(self):
+        self.full = self.filtered = None
+        self._refresh_results()
+
+    def set_filter(self, alpha: float, lam: float):
+        self.alpha, self.lam = alpha, lam
+        self.filtered = None
+        self._refresh_results()
+
+    def _refresh_results(self):
+        mask = alpha_mask(self.samples, self.lam, self.alpha)
+        self.cluster_chart.plot_clusters(self.samples, mask, self.metric.currentIndex(),
+                                         self.full, self.filtered)
+        self._refresh_table(mask)
+        if self.samples:
+            message = f'Прошли фильтр: {mask.sum()} из {len(self.samples)}'
+            if mask.any() and self.filtered is None:
+                message += '\nЗапустите кластеризацию для этого отбора.'
+            self.cluster_status.setText(message)
 
     def generate_data(self):
         try:
             n = self.n_samples.value()
             seed = self.seed.value()
-            mode = 'groups' if self.generation_mode.currentIndex() == 0 else 'uniform'
-            self.samples = generate_samples(n, seed=seed, mode=mode)
-            self.cluster_labels = None
-            self.cluster_chart.plot_clusters(self.samples, self.cluster_labels)
-            self._refresh_table()
-            self.cluster_status.setText(f'Создано величин: {n}\n'
-                                        f'Режим: {self.generation_mode.currentText()}\n'
-                                        'Можно запускать кластеризацию.')
-            self._write_log(f'Генерация {n} нечётких величин, seed={seed}, mode={mode}.')
-            # Записываем данные каждой величины в журнал на диске.
-            for i, sample in enumerate(self.samples, 1):
-                self.journal.info(f'X{i}: a={sample.a:.6f}, λ={sample.lam:.6f}, '
-                                 f'α=0.01 [{sample.number.left[0]:.6f}; {sample.number.right[0]:.6f}].')
+            self.samples = generate_samples(n, self.lam, seed=seed)
+            self.full = self.filtered = None
+            self._refresh_results()
+            self._write_log(f'Сгенерировано {n} интервалов при λ={self.lam:g}, seed={seed}.')
+            for index, number in enumerate(self.samples, 1):
+                self.journal.info('X%d: [%.8g; %.8g].', index, number.left, number.right)
         except (ValueError, OverflowError) as exc:
             QMessageBox.warning(self, 'Ошибка генерации', str(exc))
 
+    def _set_busy(self, busy: bool):
+        for widget in (self.cluster_btn, self.generate_btn, self.metric,
+                       self.k_count, self.iterations, self.seed):
+            widget.setDisabled(busy)
+        self.busy_changed.emit(busy)
+
     def cluster_data(self):
-        if not self.samples:
-            QMessageBox.information(self, 'Нет данных', 'Сначала сгенерируйте набор величин.')
-            return
         if self.thread is not None:
             return
-        mode = 'count' if self.mode_count.isChecked() else 'threshold'
-        value = self.k_count.value() if mode == 'count' else self.threshold.value()
-        if mode == 'count' and value > len(self.samples):
-            QMessageBox.warning(self, 'Неверное k', 'Число кластеров не должно превышать объём набора.')
+        if not self.samples:
+            QMessageBox.information(self, 'Нет данных', 'Сначала сгенерируйте интервалы.')
             return
-        self.current_condition = f'k={value}' if mode == 'count' else f'порог d={value:g}'
         self.cluster_status.setText('Вычисление кластеров…')
-        self.cluster_btn.setEnabled(False)
-        self.generate_btn.setEnabled(False)
+        self._set_busy(True)
         self.thread = QThread(self)
-        self.worker = ClusteringWorker([s.number for s in self.samples], mode, value)
+        self.worker = ClusteringWorker(
+            self.samples, alpha_mask(self.samples, self.lam, self.alpha), self.k_count.value(),
+            self.metric.currentIndex(), self.iterations.value(), self.seed.value(),
+        )
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.result.connect(self._cluster_success)
@@ -185,19 +206,17 @@ class ClustersPage(QWidget):
         self.thread.start()
 
     @pyqtSlot(object)
-    def _cluster_success(self, labels):
-        self.cluster_labels = np.asarray(labels, dtype=int)
-        unique, counts = np.unique(self.cluster_labels, return_counts=True)
-        sizes = ', '.join(str(x) for x in counts)
-        self.cluster_status.setText(f'Объектов: {len(labels)}\n'
-                                    f'Получено кластеров: {len(unique)}\n'
-                                    f'Размеры: {sizes}')
-        self._refresh_table()
-        self.cluster_chart.plot_clusters(self.samples, self.cluster_labels)
-        self._write_log(f'Кластеризация {self.current_condition}: '
-                        f'{len(unique)} кластеров, размеры {counts.tolist()}.')
-        for idx, cluster_id in enumerate(self.cluster_labels, 1):
-            self.journal.info('X%d: кластер %d.', idx, cluster_id)
+    def _cluster_success(self, results):
+        self.full, self.filtered = results
+        self._refresh_results()
+        self._write_log(f'k-medoids: k={self.k_count.value()}, метрика «{METRICS[self.metric.currentIndex()]}», '
+                        f'λ={self.lam:g}, α={self.alpha:g}. {self.cluster_status.text()}')
+        for idx, label_id in enumerate(self.full[0], 1):
+            self.journal.info('X%d: кластер %d.', idx, label_id + 1)
+        if self.filtered is not None:
+            indices = np.flatnonzero(alpha_mask(self.samples, self.lam, self.alpha))
+            for idx, label_id in zip(indices, self.filtered[0]):
+                self.journal.info('X%d: кластер после α %d.', idx + 1, label_id + 1)
 
     @pyqtSlot(str)
     def _cluster_error(self, message: str):
@@ -209,23 +228,32 @@ class ClustersPage(QWidget):
     def _worker_finished(self):
         self.thread = None
         self.worker = None
-        self.cluster_btn.setEnabled(True)
-        self.generate_btn.setEnabled(True)
+        self._set_busy(False)
 
-    def _refresh_table(self):
+    def _refresh_table(self, mask):
+        membership = exponential_membership([number.center for number in self.samples], self.lam)
+        filtered_labels = self._filtered_labels(mask)
         self.table.setUpdatesEnabled(False)
         try:
             self.table.setRowCount(len(self.samples))
-            for idx, item in enumerate(self.samples):
-                cluster_id = ('—' if self.cluster_labels is None else str(self.cluster_labels[idx]))
-                values = (str(idx + 1), f'{item.a:.4f}', f'{item.lam:.4f}',
-                          f'{1.0 / item.lam:.4f}', cluster_id)
+            for idx, number in enumerate(self.samples):
+                full_id = '—' if self.full is None else str(self.full[0][idx] + 1)
+                filtered_id = filtered_labels.get(idx, '—') if mask[idx] else 'Отсеян'
+                values = (str(idx + 1), f'{number.left:.4f}', f'{number.right:.4f}',
+                          f'{membership[idx]:.4f}', full_id, str(filtered_id))
                 for col, value in enumerate(values):
                     cell = QTableWidgetItem(value)
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if col >= 4 and value.isdecimal():
+                        cell.setForeground(QColor(CLUSTER_COLORS[(int(value) - 1) % len(CLUSTER_COLORS)]))
                     self.table.setItem(idx, col, cell)
         finally:
             self.table.setUpdatesEnabled(True)
+
+    def _filtered_labels(self, mask):
+        if self.filtered is None:
+            return {}
+        return dict(zip(np.flatnonzero(mask), self.filtered[0] + 1))
 
     def export_csv(self):
         if not self.samples:
@@ -236,7 +264,10 @@ class ClustersPage(QWidget):
         if not path:
             return
         try:
-            write_samples_csv(path, self.samples, self.cluster_labels)
+            mask = alpha_mask(self.samples, self.lam, self.alpha)
+            labels = None if self.full is None else self.full[0] + 1
+            write_samples_csv(path, self.samples, self.lam, self.alpha, mask,
+                              labels, self._filtered_labels(mask))
             self._write_log(f'Экспортировано {len(self.samples)} величин: {path}')
             QMessageBox.information(self, 'Готово', 'CSV-файл успешно сохранён.')
         except OSError as exc:

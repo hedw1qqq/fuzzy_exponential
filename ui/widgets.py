@@ -2,6 +2,7 @@
 
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -9,16 +10,16 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from clustering import Sample
 from fuzzy_numbers import FuzzyNumber, exponential_membership
 
 
-PLOT = '#131f32'
-INK = '#e8eef9'
-MUTED = '#91a1b9'
-TEAL = '#4dd3b2'
-PURPLE = '#ab9aff'
-ORANGE = '#ffbf72'
+PLOT = '#151d29'
+INK = '#ecf3fb'
+MUTED = '#a9bace'
+TEAL = '#57dfcc'
+PURPLE = '#a7b8ff'
+ORANGE = '#ffc27a'
+CLUSTER_COLORS = (TEAL, PURPLE, ORANGE, '#f4a9db', '#84c7fa', '#c2dc81', '#d3b1fa', '#fba6a0')
 
 
 def label(text: str, name: str | None = None, wrap: bool = False) -> QLabel:
@@ -62,7 +63,11 @@ def make_scroll(widget: QWidget) -> QScrollArea:
 
 def field_layout(caption: str, widget: QWidget, hint: str | None = None) -> QVBoxLayout:
     box = vertical(5, (0, 0, 0, 0))
-    box.addWidget(label(caption))
+    caption_label = label(caption, 'field')
+    caption_label.setBuddy(widget)
+    box.addWidget(caption_label)
+    if not widget.accessibleName():
+        widget.setAccessibleName(caption)
     box.addWidget(widget)
     if hint:
         box.addWidget(label(hint, 'hint', True))
@@ -71,6 +76,7 @@ def field_layout(caption: str, widget: QWidget, hint: str | None = None) -> QVBo
 
 def float_box(value: float, minimum: float, maximum: float, decimals: int = 3) -> QDoubleSpinBox:
     widget = QDoubleSpinBox()
+    widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
     widget.setRange(minimum, maximum)
     widget.setDecimals(decimals)
     widget.setSingleStep(0.1)
@@ -80,116 +86,123 @@ def float_box(value: float, minimum: float, maximum: float, decimals: int = 3) -
 
 def int_box(value: int, minimum: int, maximum: int) -> QSpinBox:
     widget = QSpinBox()
+    widget.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
     widget.setRange(minimum, maximum)
     widget.setValue(value)
     return widget
 
 
 class Chart(FigureCanvas):
-    """Встраиваемый холст Matplotlib с единой тёмной темой."""
-    def __init__(self, rows: int = 1, parent: QWidget | None = None):
-        fig = Figure(figsize=(9, 6), dpi=100, facecolor=PLOT)
+    """Встраиваемый холст для графиков приложения."""
+    def __init__(self, *, side_by_side: bool = False):
+        fig = Figure(figsize=(9, 6), dpi=100, facecolor=PLOT, layout='constrained')
         super().__init__(fig)
-        self.setParent(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        if rows == 2:
-            self.axes = list(fig.subplots(2, 1))
-            fig.subplots_adjust(left=.09, right=.97, top=.92, bottom=.11, hspace=.47)
+        if side_by_side:
+            self.axes = list(fig.subplots(1, 2))
         else:
-            self.axes = [fig.add_subplot(111)]
-            fig.subplots_adjust(left=.09, right=.97, top=.9, bottom=.16)
-        for ax in self.axes:
-            self.style_axis(ax)
+            self.axes = list(fig.subplots(2, 1, sharex=True, height_ratios=(2.1, 1)))
+        self.figure.get_layout_engine().set(h_pad=.10, w_pad=.10, hspace=.08, wspace=.12)
 
     @staticmethod
     def style_axis(ax) -> None:
         ax.set_facecolor(PLOT)
-        ax.tick_params(colors='#a7b5cd', labelsize=9)
-        for spine in ax.spines.values():
-            spine.set_color('#41516a')
-        ax.xaxis.label.set_color('#b6c4d9')
-        ax.yaxis.label.set_color('#b6c4d9')
+        ax.tick_params(colors=MUTED, labelsize=9, length=0)
+        for side, spine in ax.spines.items():
+            spine.set_color('#475974')
+            spine.set_visible(side in ('left', 'bottom'))
+        ax.xaxis.label.set_color(MUTED)
+        ax.yaxis.label.set_color(MUTED)
         ax.title.set_color(INK)
-        ax.grid(color='#64738b', alpha=.20, linewidth=.7)
+        ax.set_axisbelow(True)
+        ax.grid(color='#303e54', linewidth=.65)
 
-    def plot_values(self, a, la, b, lb, A: FuzzyNumber, B: FuzzyNumber,
-                    level: float, result: FuzzyNumber | None = None):
-        ax, ax_cut = self.axes
-        for axis in (ax, ax_cut):
+    def plot_values(self, numbers: tuple[FuzzyNumber, ...], membership: np.ndarray,
+                    lam: float, alpha: float):
+        ax, intervals = self.axes
+        for axis in self.axes:
             axis.clear()
-            Chart.style_axis(axis)
-        numbers = [A, B] + ([result] if result is not None else [])
-        low = min(float(v.left[0]) for v in numbers)
-        high = max(float(v.right[0]) for v in numbers)
+            self.style_axis(axis)
+        low = min(0, *(value.left for value in numbers))
+        high = max(3 / lam, *(value.right for value in numbers))
         pad = max(.06 * (high - low), .25)
         xs = np.linspace(low - pad, high + pad, 1200)
-        anchors = [xs, [np.nextafter(a, -np.inf), a, np.nextafter(b, -np.inf), b]]
-        if result is not None:
-            anchors.extend((result.left, result.right))
-        xs = np.unique(np.concatenate(anchors))
-        ax.plot(xs, exponential_membership(xs, a, la), lw=2.25, color=TEAL, label=f'A (a={a:g}, λ={la:g})')
-        ax.plot(xs, exponential_membership(xs, b, lb), lw=2.25, color=PURPLE, label=f'B (a={b:g}, λ={lb:g})')
-        items = [(A, TEAL, 'A'), (B, PURPLE, 'B')]
-        if result is not None:
-            ax.plot(xs, result.membership(xs), color=ORANGE, lw=2.1, label='Результат')
-            items.append((result, ORANGE, 'C'))
-        ax.set_title('Функции принадлежности μ(x)', loc='left', color=INK,
-                     fontsize=12, fontweight='bold', pad=14)
-        ax.set_xlabel('Значение x')
-        ax.set_ylabel('Степень принадлежности')
+        xs = np.unique(np.append(xs, [np.nextafter(0., -np.inf), 0.]))
+        curve = exponential_membership(xs, lam)
+        ax.plot(xs, curve, color=TEAL, lw=2, label=f'Спад λ = {lam:g}')
+        ax.axhline(alpha, color=ORANGE, ls='--', lw=1.3, label=f'Порог α = {alpha:.4f}')
+        ax.fill_between(xs, alpha, curve, where=curve >= alpha, color=TEAL, alpha=.12)
+        centers = {}
+        for name, number, mu, color in zip('ABC', numbers, membership, CLUSTER_COLORS):
+            centers.setdefault((number.center, float(mu)), []).append((name, color))
+        previous = []
+        for (center, mu), labels in sorted(centers.items()):
+            color = labels[0][1] if len(labels) == 1 else INK
+            nearby = sum(abs(center - x) < .09 * (high - low) and abs(mu - y) < .10
+                         for x, y in previous)
+            offset = 8 + 15 * nearby
+            ax.scatter(center, mu, color=color, edgecolor=PLOT, s=54, zorder=3)
+            ax.annotate(' / '.join(name for name, _ in labels), (center, mu),
+                        xytext=(6, -offset if mu > .83 else offset), textcoords='offset points',
+                        color=INK, fontsize=9)
+            previous.append((center, mu))
+        ax.set_title('Принадлежность центров', color=INK, loc='left', fontsize=12)
+        ax.set_ylabel('μ(x)')
         ax.set_ylim(-.04, 1.08)
-        legend = ax.legend(loc='upper right', fontsize=8, framealpha=.12)
-        for item in legend.get_texts():
+        for item in ax.legend(loc='upper right', fontsize=9, frameon=False).get_texts():
             item.set_color(INK)
-        for value, color, name in items:
-            ax_cut.plot(value.left, value.alphas, color=color, lw=1.9, label=f'{name} · левый')
-            ax_cut.plot(value.right, value.alphas, color=color, lw=1.9, ls='--', label=f'{name} · правый')
-            ax_cut.fill_betweenx(value.alphas, value.left, value.right, color=color, alpha=.06)
-        self.alpha_line = ax_cut.axhline(level, color='#c3d3e5', alpha=.8, lw=1.0, ls=':')
-        ax_cut.set_ylim(0, 1.035)
-        ax_cut.set_title('Границы α-срезов', loc='left', color=INK,
-                         fontsize=12, fontweight='bold', pad=12)
-        ax_cut.set_xlabel('Значение x')
-        ax_cut.set_ylabel('Уровень α')
-        legend2 = ax_cut.legend(loc='upper right', fontsize=8, ncol=2, framealpha=.12)
-        for item in legend2.get_texts():
-            item.set_color(INK)
+        for index, (value, color) in enumerate(zip(numbers, (TEAL, PURPLE, ORANGE))):
+            intervals.plot([value.left, value.right], [index, index], color=color, lw=2, marker='o')
+            position = (value.center - low) / (high - low)
+            alignment = 'left' if position < .12 else 'right' if position > .88 else 'center'
+            bounds = f'[{value.left:g}; {value.right:g}]'.replace('-', '−')
+            intervals.annotate(bounds, (value.center, index), xytext=(0, 6),
+                               textcoords='offset points', ha=alignment, va='bottom',
+                               color=color, fontsize=9)
+        intervals.set_yticks(range(len(numbers)), ('A', 'B', 'C · результат')[:len(numbers)])
+        intervals.set_ylim(len(numbers) - .5, -.65)
+        intervals.set_xlim(low - pad, high + pad)
+        intervals.set_title('Границы интервалов', color=INK, loc='left', fontsize=11)
+        intervals.set_xlabel('Значение x')
         self.draw_idle()
 
-    def set_alpha(self, level: float):
-        self.alpha_line.set_ydata([level, level])
-        self.draw_idle()
-
-    def plot_clusters(self, samples: list[Sample], labels: np.ndarray | None):
-        ax = self.axes[0]
-        ax.clear()
-        Chart.style_axis(ax)
-        ax.set_title('Положение и масштаб нечётких величин', loc='left', color=INK,
-                     fontsize=12, fontweight='bold', pad=14)
-        ax.set_xlabel('Положение a')
-        ax.set_ylabel('Масштаб 1/λ')
+    def plot_clusters(self, samples, mask, metric, full=None, filtered=None):
+        widths = np.array([number.right - number.left for number in samples])
+        centers = np.array([number.center for number in samples])
+        ylabel = {1: 'Ширина интервала', 2: 'Квадрат ширины'}.get(metric, 'Расстояние до медоида')
+        for ax, indices, result, title in (
+            (self.axes[0], np.ones(len(samples), dtype=bool), full, 'Весь набор'),
+            (self.axes[1], mask, filtered, 'После α'),
+        ):
+            ax.clear()
+            self.style_axis(ax)
+            ax.set_title(f'{title}  ·  {int(indices.sum())}', color=INK, loc='left', fontsize=11)
+            ax.set_xlabel('Центр интервала')
+            if ax is self.axes[0]:
+                ax.set_ylabel(ylabel if result is not None else 'Ширина интервала')
+            if not np.any(indices):
+                message = 'Нет интервалов после фильтрации' if samples else 'Сгенерируйте интервалы'
+                ax.text(.5, .5, message, transform=ax.transAxes, ha='center', color=MUTED)
+                continue
+            if result is None and full is not None:
+                ax.text(.5, .5, 'Запустите кластеризацию', transform=ax.transAxes,
+                        ha='center', color=MUTED, fontsize=9)
+                continue
+            if result is None:
+                ax.scatter(centers[indices], widths[indices], color=TEAL, s=23)
+                continue
+            labels, distance_to_medoid = result
+            ordinates = widths[indices] if metric == 1 else distance_to_medoid
+            if metric == 2:
+                ordinates = widths[indices]**2
+            ax.scatter(centers[indices], ordinates, c=labels % len(CLUSTER_COLORS),
+                       cmap=ListedColormap(CLUSTER_COLORS), vmin=0, vmax=len(CLUSTER_COLORS) - 1, s=22)
         if samples:
-            xs = np.array([s.a for s in samples])
-            ys = np.array([1 / s.lam for s in samples])
-            if labels is None:
-                ax.scatter(xs, ys, s=35, c=TEAL, alpha=.85, edgecolors='none')
-            else:
-                ids = np.unique(labels)
-                if len(ids) <= 12:
-                    colors = ('#4dd3b2', '#ab9aff', '#ffbf72', '#ef7d8e',
-                              '#71c9ff', '#e5ca7c', '#ff94d1', '#79e5a0',
-                              '#b7aafc', '#8ee7e9', '#e7a879', '#83a1f4')
-                    for i, group in enumerate(ids):
-                        mask = labels == group
-                        ax.scatter(xs[mask], ys[mask], s=36, color=colors[i % len(colors)],
-                                   label=f'Кластер {group} · {mask.sum()}', alpha=.9, edgecolors='none')
-                    legend = ax.legend(loc='upper right', framealpha=.12, fontsize=8, ncol=2)
-                    for item in legend.get_texts():
-                        item.set_color(INK)
-                else:
-                    ax.scatter(xs, ys, s=32, c=labels, cmap='tab20',
-                               alpha=.9, edgecolors='none')
-        else:
-            ax.text(.5, .5, 'Сгенерируйте данные, чтобы увидеть график',
-                    transform=ax.transAxes, ha='center', va='center', color=MUTED)
+            first, second = self.axes
+            second.set_xlim(first.get_xlim())
+            if filtered is not None or full is None:
+                lower, upper = zip(first.get_ylim(), second.get_ylim())
+                if filtered is not None or mask.any():
+                    first.set_ylim(min(lower), max(upper))
+                second.set_ylim(first.get_ylim())
         self.draw_idle()

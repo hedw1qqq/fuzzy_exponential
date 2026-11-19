@@ -4,16 +4,18 @@ from datetime import datetime
 from pathlib import Path
 import sys
 
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import QSignalBlocker, Qt
+from PyQt6.QtGui import QColor, QFont, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QMainWindow,
-    QMessageBox, QPlainTextEdit, QStackedWidget, QVBoxLayout, QWidget,
+    QMessageBox, QPlainTextEdit, QSlider, QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from fuzzy_numbers import ALPHA
 from ui.clusters import ClustersPage
 from ui.storage import Journal
 from ui.values import ValuesPage
-from ui.widgets import button, card, label, make_scroll, vertical
+from ui.widgets import button, card, field_layout, float_box, label, make_scroll, vertical
 
 
 ROOT = Path(__file__).resolve().parent
@@ -23,8 +25,9 @@ class FuzzyWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Экспоненциальные нечёткие величины')
-        self.resize(1380, 860)
-        self.setMinimumSize(950, 660)
+        self.setMinimumSize(900, 620)
+        area = self.screen().availableGeometry()
+        self.resize(min(1360, area.width() - 32), min(820, area.height() - 48))
         self.journal = Journal(ROOT)
         self._build_ui()
         self.values_page.show_values()
@@ -39,49 +42,77 @@ class FuzzyWindow(QMainWindow):
         root = QWidget()
         root.setObjectName('root')
         self.setCentralWidget(root)
-        shell = QHBoxLayout(root)
-        shell.setContentsMargins(0, 0, 0, 0)
-        shell.setSpacing(0)
+        shell = vertical(0, (0, 0, 0, 0))
+        root.setLayout(shell)
 
-        sidebar = QFrame()
-        sidebar.setObjectName('sidebar')
-        sidebar.setFixedWidth(235)
-        side = vertical(12, (20, 27, 20, 20))
-        sidebar.setLayout(side)
-        side.addWidget(label('Практическая работа', 'brand', True))
-        side.addWidget(label('Экспоненциальные нечёткие величины', 'subbrand', True))
-        side.addSpacing(25)
+        navigation = QFrame()
+        navigation.setObjectName('navigation')
+        nav_layout = QHBoxLayout(navigation)
+        nav_layout.setContentsMargins(22, 9, 22, 9)
+        nav_layout.setSpacing(5)
+        nav_layout.addWidget(label('Нечёткие величины', 'brand'))
+        nav_layout.addSpacing(23)
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         self.nav_buttons = []
-        for idx, title in enumerate(('Величины и операции', 'Кластеризация', 'Журнал', 'О модели')):
+        for idx, title in enumerate(('Интервалы', 'Кластеризация', 'Журнал', 'О модели')):
             nav = button(title)
             nav.setObjectName('nav')
             nav.setCheckable(True)
             nav.clicked.connect(lambda _checked=False, i=idx: self.open_page(i))
             self.nav_group.addButton(nav, idx)
             self.nav_buttons.append(nav)
-            side.addWidget(nav)
-        side.addStretch(1)
-        side.addWidget(label('МАИ · Неклассические логики', 'hint', True))
-        shell.addWidget(sidebar)
+            nav_layout.addWidget(nav)
+        nav_layout.addStretch()
+        shell.addWidget(navigation)
 
         content = QWidget()
         content.setObjectName('page')
-        outer = vertical(14, (23, 18, 23, 16))
+        outer = vertical(12, (22, 14, 22, 10))
         content.setLayout(outer)
-        header = QHBoxLayout()
-        header_text = vertical(4, (0, 0, 0, 0))
         self.page_title = label('', 'title')
-        self.page_subtitle = label('', 'subtitle')
-        header_text.addWidget(self.page_title)
-        header_text.addWidget(self.page_subtitle)
-        header.addLayout(header_text)
-        header.addStretch(1)
-        outer.addLayout(header)
+        outer.addWidget(self.page_title)
+        self.model = QFrame()
+        self.model.setObjectName('model')
+        controls = QHBoxLayout(self.model)
+        controls.setContentsMargins(14, 9, 14, 9)
+        controls.setSpacing(16)
+        self.rate = float_box(1.0, 0.01, 100)
+        self.rate.setFixedWidth(110)
+        self.rate.setKeyboardTracking(False)
+        self.rate.setToolTip('Чем больше λ, тем быстрее убывает принадлежность при x > 0.')
+        controls.addLayout(field_layout('Скорость спада λ', self.rate))
+
+        self.alpha_input = float_box(ALPHA, 0, 1, decimals=4)
+        self.alpha_input.setFixedWidth(94)
+        self.alpha_input.setSingleStep(.01)
+        self.alpha_input.setKeyboardTracking(False)
+        controls.addLayout(field_layout('Порог отбора α', self.alpha_input))
+        self.alpha_slider = QSlider(Qt.Orientation.Horizontal)
+        self.alpha_slider.setAccessibleName('Порог отбора α')
+        self.alpha_slider.setFixedHeight(33)
+        self.alpha_slider.setToolTip('Сравнивается с принадлежностью центра интервала')
+        self.alpha_slider.setRange(0, 10000)
+        self.alpha_slider.setValue(round(ALPHA * 10000))
+        self.alpha_slider.setSingleStep(100)
+        self.alpha_slider.setPageStep(1000)
+        self.alpha_slider.setTracking(False)
+        controls.addWidget(self.alpha_slider, 1, Qt.AlignmentFlag.AlignBottom)
+        controls.addWidget(label('μ(x) = exp(−λx)  при x ≥ 0', 'formula'),
+                           alignment=Qt.AlignmentFlag.AlignVCenter)
+        outer.addWidget(self.model)
+
         self.pages = QStackedWidget()
         self.values_page = ValuesPage(self._write_log)
         self.clusters_page = ClustersPage(self._write_log, self.journal)
+        self.alpha_slider.valueChanged.connect(self._set_filter)
+        self.alpha_input.valueChanged.connect(
+            lambda alpha: self.alpha_slider.setValue(round(alpha * 10000))
+        )
+        self.rate.valueChanged.connect(self._set_filter)
+        self.clusters_page.busy_changed.connect(self.alpha_slider.setDisabled)
+        self.clusters_page.busy_changed.connect(self.rate.setDisabled)
+        self.clusters_page.busy_changed.connect(self.alpha_input.setDisabled)
         self.pages.addWidget(self.values_page)
         self.pages.addWidget(self.clusters_page)
         self.pages.addWidget(self._build_journal_page())
@@ -90,22 +121,24 @@ class FuzzyWindow(QMainWindow):
         bottom = QHBoxLayout()
         self.status_text = label('Готово к работе.', 'hint', True)
         bottom.addWidget(self.status_text, 1)
-        bottom.addWidget(label('μ(x) = exp(−λ(x−a)), x ≥ a', 'hint'))
         outer.addLayout(bottom)
         shell.addWidget(content, 1)
         self.open_page(0)
 
+    def _set_filter(self):
+        alpha = self.alpha_slider.value() / 10000
+        lam = self.rate.value()
+        with QSignalBlocker(self.alpha_input):
+            self.alpha_input.setValue(alpha)
+        self.values_page.set_filter(alpha, lam)
+        self.clusters_page.set_filter(alpha, lam)
+
     def open_page(self, index: int):
-        titles = [
-            ('Величины и операции', 'Параметры, графики принадлежности, α-срезы и арифметика'),
-            ('Кластеризация', 'Генерация 100–300 величин и кластерный анализ по двум критериям'),
-            ('Журнал', 'История действий программы с сохранением в файл'),
-            ('О математической модели', 'Формулы, принятые соглашения и ограничения'),
-        ]
+        titles = ('Интервалы и операции', 'Кластеризация', 'Журнал', 'Математическая модель')
         self.pages.setCurrentIndex(index)
         self.nav_buttons[index].setChecked(True)
-        self.page_title.setText(titles[index][0])
-        self.page_subtitle.setText(titles[index][1])
+        self.page_title.setText(titles[index])
+        self.model.setVisible(index in (0, 1))
 
     def _build_journal_page(self):
         page = QWidget()
@@ -157,23 +190,22 @@ class FuzzyWindow(QMainWindow):
         body = vertical(14)
         content.setLayout(body)
         sections = [
-            ('01  Экспоненциальная модель',
-             'Для x < a принадлежность равна 0. При x ≥ a функция μ(x) = exp(−λ(x−a)), λ > 0. '
-             'Это плотность сдвинутого экспоненциального распределения, нормированная на её максимум λ. '
-             'Вариант «экспоненциальное распределение» здесь интерпретируется как нечёткая величина.'),
-            ('02  α-срезы',
-             'Aα = [a, a − ln(α)/λ], 0 < α ≤ 1. Компьютер хранит 199 срезов: от α=0.01 до α=1. '
-             'При α→0 носитель справа неограничен, поэтому результаты являются численным приближением.'),
-            ('03  Операции и сравнение',
+            ('Экспоненциальная модель',
+             'При x ≥ 0 функция μ(x) = exp(−λx), при x < 0 она равна нулю. '
+             'Это экспоненциальная плотность, нормированная на максимум λ. Чем больше λ, '
+             'тем быстрее падает принадлежность. При x = 1/λ она равна e⁻¹ ≈ 0,368.'),
+            ('Фильтрация по α',
+             'Интервал проходит фильтр, если степень принадлежности его центра не меньше α. '
+             'Арифметические операции выполняются над границами интервалов.'),
+            ('Операции и сравнение',
              'Сложение/вычитание: арифметика границ интервалов. Умножение/деление: min/max '
              'попарных комбинаций концов интервалов. Деление запрещено, если интервал делителя '
-             'содержит ноль. Сравнение выполняется по среднему значению середин α-срезов; '
-             'это выбранный критерий, а не универсальный порядок нечётких множеств.'),
-            ('04  Кластерный анализ',
-             'Генерация 100–300 величин с параметрами (a, λ). Расстояние — RMS отклонение левых и '
-             'правых границ α-срезов. Агломеративная кластеризация complete linkage останавливается '
-             'либо при k кластерах, либо при превышении выбранного порога расстояния.'),
-            ('05  Структура и использование',
+             'содержит ноль. Если интервалы пересекаются или касаются границами, выводится знак ≈. '
+             'Для раздельных интервалов определяется, какой из них расположен левее.'),
+            ('Кластерный анализ',
+             'k-medoids группирует все интервалы и отдельно повторяет расчёт для тех, которые прошли фильтр. '
+             'Медоидом становится элемент с минимальной суммой расстояний до остальных в группе.'),
+            ('Структура и использование',
              'fuzzy_numbers.py — независимая библиотека математических операций; '
              'clustering.py — библиотека генерации и кластеризации; app.py — только интерфейс PyQt6. '
              'Журнал автоматически создаётся в logs/app.log, результаты можно выгрузить в CSV. '
@@ -206,6 +238,15 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     app.setFont(QFont('Segoe UI', 10))
+    palette = app.palette()
+    for role, color in (
+        (QPalette.ColorRole.Window, '#111722'), (QPalette.ColorRole.Base, '#0e1520'),
+        (QPalette.ColorRole.Button, '#223046'), (QPalette.ColorRole.Text, '#ecf3fb'),
+        (QPalette.ColorRole.WindowText, '#ecf3fb'), (QPalette.ColorRole.ButtonText, '#ecf3fb'),
+        (QPalette.ColorRole.Highlight, '#287d75'), (QPalette.ColorRole.HighlightedText, '#ffffff'),
+    ):
+        palette.setColor(role, QColor(color))
+    app.setPalette(palette)
     app.setStyleSheet((ROOT / 'ui' / 'style.qss').read_text(encoding='utf-8'))
     window = FuzzyWindow()
     window.show()

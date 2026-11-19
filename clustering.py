@@ -1,114 +1,95 @@
-"""Независимая библиотека генерации и кластерного анализа нечётких величин.
+"""Генерация интервалов, фильтрация по α и кластеризация k-medoids."""
 
-Расстояние — среднеквадратичное различие границ α-срезов.
-Алгоритм — иерархическая агломеративная кластеризация, complete linkage.
-Останов: число кластеров k ИЛИ максимальный допустимый межкластерный порог.
-"""
+from math import log, isfinite
 
-from dataclasses import dataclass
-import heapq
 import numpy as np
-from fuzzy_numbers import FuzzyNumber, exponential
+
+from fuzzy_numbers import FuzzyNumber, exponential_membership
 
 
-@dataclass(frozen=True)
-class Sample:
-    a: float
-    lam: float
-    number: FuzzyNumber
+METRICS = (
+    'Хаусдорф для границ',
+    'Разность ширин',
+    'Разность квадратов ширин',
+    'Евклидово расстояние между границами',
+)
 
 
-def generate_samples(n: int, seed: int = 42, mode: str = "groups") -> list[Sample]:
+def generate_samples(n: int, lam: float = 1.0, *, seed: int = 42) -> list[FuzzyNumber]:
     if isinstance(n, bool) or not isinstance(n, (int, np.integer)) or not 100 <= n <= 300:
-        raise ValueError("Количество нечётких величин должно быть от 100 до 300.")
-    rng = np.random.default_rng(seed)
-    if mode == 'groups':
-        center_a = np.array([1.0, 4.15, 7.3, 10.45])
-        center_lam = np.array([0.65, 1.65, 0.9, 1.9])
-        cls = rng.integers(0, len(center_a), size=n)
-        aa = np.clip(rng.normal(center_a[cls], 0.42), 0, 12)
-        lam = np.clip(rng.normal(center_lam[cls], 0.14), 0.2, 2.5)
-    elif mode == 'uniform':
-        aa = rng.uniform(0.0, 12.0, n)
-        lam = rng.uniform(0.35, 2.4, n)
-    else:
-        raise ValueError("Режим генерации: groups или uniform.")
-    return [Sample(float(a), float(p), exponential(float(a), float(p), f"X{i+1}"))
-            for i, (a, p) in enumerate(zip(aa, lam))]
+        raise ValueError("Количество величин должно быть от 100 до 300.")
+    if not isfinite(lam) or lam <= 0:
+        raise ValueError("Интенсивность λ должна быть положительной и конечной.")
+    rng = np.random.Generator(np.random.MT19937(seed))
+    scale = 1 / lam
+    # Как для ветви Вейбулла с k = 1, размер окна задаёт медиана распределения.
+    median = log(2) * scale
+    limit = max(1.0, 3 * median)
+    result = []
+    for _ in range(n):
+        center = rng.exponential(scale)
+        while center > limit:
+            center = rng.exponential(scale)
+        half_width = max(0.05, median * rng.uniform(0.03, 0.18))
+        result.append(FuzzyNumber(max(0.0, center - half_width), center + half_width))
+    return result
 
 
-def pairwise_distances(numbers: list[FuzzyNumber]) -> np.ndarray:
+def alpha_mask(numbers: list[FuzzyNumber], lam: float, alpha: float) -> np.ndarray:
+    if not 0 <= alpha <= 1:
+        raise ValueError("Уровень α должен лежать в [0, 1].")
+    return exponential_membership([number.center for number in numbers], lam) >= alpha
+
+
+def pairwise_distances(numbers: list[FuzzyNumber], metric: int = 0) -> np.ndarray:
     if not numbers:
         raise ValueError("Набор нечётких величин пуст.")
-    ref = numbers[0].alphas
-    if any(not np.array_equal(num.alphas, ref) for num in numbers):
-        raise ValueError("Все нечёткие величины должны иметь одни α-уровни.")
-    features = np.stack([np.concatenate((v.left, v.right)) for v in numbers])
-    dist = np.zeros((len(numbers), len(numbers)))
-    for i, feature in enumerate(features[:-1]):
-        differences = features[i + 1:] - feature
-        distances = np.sqrt(np.mean(differences**2, axis=1))
-        dist[i, i + 1:] = distances
-        dist[i + 1:, i] = distances
-    return dist
+    left = np.array([number.left for number in numbers])
+    right = np.array([number.right for number in numbers])
+    if metric == 0:
+        return np.maximum(np.abs(left[:, None] - left), np.abs(right[:, None] - right))
+    if metric == 3:
+        return np.hypot(left[:, None] - left, right[:, None] - right)
+    width = right - left
+    if metric == 2:
+        width = width**2
+    elif metric != 1:
+        raise ValueError("Неизвестная метрика.")
+    return np.abs(width[:, None] - width)
 
 
-def cluster_numbers(numbers: list[FuzzyNumber], *, k: int | None = None,
-                    threshold: float | None = None) -> np.ndarray:
-    """Complete linkage по RMS-расстоянию α-срезов.
+def k_medoids(distances: np.ndarray, k: int, max_iter: int = 100,
+              seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
+    """Вернуть метки с нуля и индексы медоидов."""
+    n = len(distances)
+    if not 1 <= k <= n:
+        raise ValueError(f"Количество кластеров должно быть от 1 до {n}.")
+    if max_iter < 1:
+        raise ValueError("Число итераций должно быть положительным.")
+    rng = np.random.Generator(np.random.MT19937(seed))
+    medoids = [int(rng.integers(n))]
+    while len(medoids) < k:
+        nearest = distances[:, medoids].min(axis=1)
+        nearest[medoids] = -1
+        medoids.append(int(nearest.argmax()))
 
-    Ровно один параметр: k — итоговое число кластеров; либо threshold —
-    максимальное расстояние между элементами объединяемых кластеров.
-    """
-    if (k is None) == (threshold is None):
-        raise ValueError("Укажите либо k, либо порог, но не оба параметра.")
-    n = len(numbers)
-    if not n:
-        raise ValueError("Нечего кластеризовать.")
-    if k is not None and (not isinstance(k, int) or isinstance(k, bool) or not 1 <= k <= n):
-        raise ValueError(f"Количество кластеров k должно быть в диапазоне 1..{n}.")
-    if threshold is not None and (not np.isfinite(threshold) or threshold <= 0):
-        raise ValueError("Порог должен быть положительным конечным числом.")
-
-    initial = pairwise_distances(numbers)
-    active = set(range(n))
-    members = {i: [i] for i in range(n)}
-    distances = {}
-    heap = []
-    for i in range(n):
-        for j in range(i+1, n):
-            d = float(initial[i, j])
-            distances[(i, j)] = d
-            heap.append((d, i, j))
-    heapq.heapify(heap)
-    next_id = n
-    while len(active) > 1 and (k is None or len(active) > k):
-        while heap:
-            dist, i, j = heapq.heappop(heap)
-            if i in active and j in active:
-                break
-        else:
+    labels = np.full(n, -1)
+    for _ in range(max_iter):
+        new_labels = distances[:, medoids].argmin(axis=1)
+        changed = not np.array_equal(labels, new_labels)
+        labels = new_labels
+        for group, medoid in enumerate(medoids):
+            members = np.flatnonzero(labels == group)
+            if members.size:
+                costs = distances[np.ix_(members, members)].sum(axis=1)
+                best = int(members[costs.argmin()])
+            else:
+                nearest = distances[:, medoids].min(axis=1)
+                nearest[medoids] = -1
+                best = int(nearest.argmax()) if len(medoids) < n else medoid
+            if best != medoid:
+                medoids[group] = best
+                changed = True
+        if not changed:
             break
-        if threshold is not None and dist > threshold:
-            break
-        active.remove(i)
-        active.remove(j)
-        current = next_id
-        next_id += 1
-        members[current] = members.pop(i) + members.pop(j)
-        # Lance–Williams для complete linkage: D(A∪B,C)=max(D(A,C),D(B,C)).
-        for other in active:
-            key1 = (min(i, other), max(i, other))
-            key2 = (min(j, other), max(j, other))
-            new_d = max(distances[key1], distances[key2])
-            key_new = (min(other, current), max(other, current))
-            distances[key_new] = new_d
-            heapq.heappush(heap, (new_d, *key_new))
-        active.add(current)
-    # Для воспроизводимого отображения сортируем кластеры по средней левой границе.
-    ordered = sorted(active, key=lambda group: float(np.mean(
-        [numbers[idx].left[-1] for idx in members[group]])))
-    labels = np.empty(n, dtype=int)
-    for label, group in enumerate(ordered, start=1):
-        labels[members[group]] = label
-    return labels
+    return labels, np.array(medoids)

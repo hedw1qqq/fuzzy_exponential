@@ -28,7 +28,8 @@ class FuzzyWindow(QMainWindow):
         self.setMinimumSize(900, 620)
         area = self.screen().availableGeometry()
         self.resize(min(1360, area.width() - 32), min(820, area.height() - 48))
-        self.journal = Journal(ROOT)
+        log_root = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else ROOT
+        self.journal = Journal(log_root)
         self._build_ui()
         self.values_page.show_values()
         self._write_log('Приложение запущено.')

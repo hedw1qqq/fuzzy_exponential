@@ -1,8 +1,12 @@
 # Экспоненциальные нечёткие величины — PyQt6
 
+[Скачать программу для Windows x64 в разделе Releases](https://github.com/hedw1qqq/fuzzy_exponential/releases/tag/v1.0.0)
+
+Скачайте и запустите `FuzzyExponential-Windows-x64.exe`. Устанавливать Python не нужно.
+
 Практическая работа по дисциплине «Неклассические логики» (МАИ, 2026). Программа выполняет арифметические операции над интервалами, фильтрует их по экспоненциальной функции принадлежности и группирует методом k-medoids.
 
-## Запуск на Windows 10/11
+## Запуск из исходного кода на Windows
 
 1. Распакуйте архив в обычную папку (например `C:\Users\...\Documents\fuzzy-lab`).
 2. Установите [Python](https://www.python.org/downloads/) версии 3.10 или новее. При установке можно отметить «Add Python to PATH».
@@ -82,3 +86,23 @@ py -m unittest discover -s tests -v
 ```
 
 Для GUI smoke-тестов требуется установленный PyQt6 и доступное графическое окружение; на CI Linux тесты можно запускать с `QT_QPA_PLATFORM=offscreen`. На Windows это не требуется.
+
+## Сборка EXE
+
+Для сборки `v1.0.0` использован Python 3.12.1 x64. Выполните в PowerShell из корня проекта:
+
+```powershell
+py -3.12 -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install -r requirements-build-windows.txt
+$qss = (Resolve-Path -LiteralPath ui/style.qss).Path
+$previousPath = $env:Path
+try {
+    $env:Path = "$env:windir\System32;$env:windir"
+    & .\.venv\Scripts\python.exe -m PyInstaller --clean --onefile --windowed --noupx `
+      --name FuzzyExponential-Windows-x64 --add-data "${qss}:ui" app.py
+} finally {
+    $env:Path = $previousPath
+}
+```
+
+Готовый файл находится в папке `dist`.
